@@ -1,5 +1,10 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Data;
 using Microsoft.Data.SqlClient;
+using System.IO;
+using ExcelDataReader;
+using System.Text;
 
 class Program
 {
@@ -7,134 +12,163 @@ class Program
 
     static void Main(string[] args)
     {
+        // Option 1: Insert sample records manually
+        //InsertSampleRecords();
+
+        // Option 2: Import from Excel
+        ImportFromExcel();
+    }
+
+    static void InsertSampleRecords()
+    {
         int customerId = InsertCustomer("John Doe", "john@example.com");
         int employeeId = InsertEmployee("Jane Smith", "Cashier");
-        int productId = InsertProduct("Diesel", "Fuel", 3.49m);
-
-        int orderId = InsertOrder(customerId, DateTime.Now, "Cash", 34.90m, "Completed");
-        InsertOrderDetail(orderId, productId, 10); // 10 units x $3.49
-
-        Console.WriteLine("All records inserted.");
-        Console.ReadKey();
     }
 
-    static int InsertCustomer(string fullName, string email)
+    static void ImportFromExcel()
     {
-        using SqlConnection conn = new SqlConnection(connectionString);
-        conn.Open();
+        string filePath = @"C:\Users\sande\source\repos\GasStation\GasStation\Resource\PurchaseOrdersWithCustomer.xlsx";
 
-        // Check if customer already exists
-        string checkQuery = "SELECT CustomerID FROM Customers WHERE Email = @Email";
-        using SqlCommand checkCmd = new SqlCommand(checkQuery, conn);
-        checkCmd.Parameters.AddWithValue("@Email", email);
+        if (!File.Exists(filePath))
+        {
+            Console.WriteLine("❌ Excel file not found at: " + filePath);
+            return;
+        }
 
-        object existingId = checkCmd.ExecuteScalar();
-        if (existingId != null)
-            return (int)existingId;
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
-        // Insert new customer
-        string insertQuery = @"
-            INSERT INTO Customers (FullName, Email, CreatedAt)
-            OUTPUT INSERTED.CustomerID
-            VALUES (@FullName, @Email, @CreatedAt)";
-        using SqlCommand insertCmd = new SqlCommand(insertQuery, conn);
-        insertCmd.Parameters.AddWithValue("@FullName", fullName);
-        insertCmd.Parameters.AddWithValue("@Email", email);
-        insertCmd.Parameters.AddWithValue("@CreatedAt", DateTime.Now);
-        return (int)insertCmd.ExecuteScalar();
+        var records = new List<OrderRecord>();
+
+        using (var stream = File.Open(filePath, FileMode.Open, FileAccess.Read))
+        using (var reader = ExcelReaderFactory.CreateReader(stream))
+        {
+            var dataset = reader.AsDataSet();
+            var table = dataset.Tables[0];
+
+            for (int i = 1; i < table.Rows.Count; i++) // skip header
+            {
+                var row = table.Rows[i];
+                records.Add(new OrderRecord
+                {
+                    OrderID = Convert.ToInt32(row[0]),
+                    FullName = row[1].ToString(),
+                    PhoneNumber = string.IsNullOrWhiteSpace(row[2]?.ToString()) ? "UNKNOWN" : row[2].ToString().Trim(),
+                    Email = row[3].ToString(),
+                    VehicleNumber = row[4].ToString(),
+                    OrderDateTime = Convert.ToDateTime(row[5]),
+                    PaymentMethod = row[6].ToString(),
+                    TotalAmount = Convert.ToDecimal(row[7]),
+                    Status = row[8].ToString()
+                });
+            }
+        }
+
+        int newCustomers = 0;
+        int totalOrders = 0;
+
+        using (SqlConnection conn = new SqlConnection(connectionString))
+        {
+            conn.Open();
+
+            foreach (var record in records)
+            {
+                int customerId;
+
+                // Check if customer exists
+                using (var checkCmd = new SqlCommand("SELECT CustomerID FROM Customers WHERE PhoneNumber = @Phone", conn))
+                {
+                    checkCmd.Parameters.AddWithValue("@Phone", record.PhoneNumber);
+                    var result = checkCmd.ExecuteScalar();
+
+                    if (result != null)
+                    {
+                        customerId = Convert.ToInt32(result);
+                    }
+                    else
+                    {
+                        using (var insertCustomer = new SqlCommand(
+                            @"INSERT INTO Customers (FullName, PhoneNumber, Email, VehicleNumber, CreatedAt)
+                              VALUES (@FullName, @Phone, @Email, @Vehicle, @CreatedAt);
+                              SELECT SCOPE_IDENTITY();", conn))
+                        {
+                            insertCustomer.Parameters.AddWithValue("@FullName", record.FullName);
+                            insertCustomer.Parameters.AddWithValue("@Phone", record.PhoneNumber);
+                            insertCustomer.Parameters.AddWithValue("@Email", record.Email);
+                            insertCustomer.Parameters.AddWithValue("@Vehicle", record.VehicleNumber);
+                            insertCustomer.Parameters.AddWithValue("@CreatedAt", DateTime.Now);
+
+                            customerId = Convert.ToInt32(insertCustomer.ExecuteScalar());
+                            newCustomers++;
+                        }
+                    }
+                }
+
+                // Insert into Orders
+                using (var insertOrder = new SqlCommand(
+                    @"INSERT INTO Orders (CustomerID, OrderDateTime, PaymentMethod, TotalAmount, Status)
+                      VALUES (@CustomerID, @OrderDateTime, @PaymentMethod, @TotalAmount, @Status)", conn))
+                {
+                    insertOrder.Parameters.AddWithValue("@CustomerID", customerId);
+                    insertOrder.Parameters.AddWithValue("@OrderDateTime", record.OrderDateTime);
+                    insertOrder.Parameters.AddWithValue("@PaymentMethod", record.PaymentMethod);
+                    insertOrder.Parameters.AddWithValue("@TotalAmount", record.TotalAmount);
+                    insertOrder.Parameters.AddWithValue("@Status", record.Status);
+
+                    insertOrder.ExecuteNonQuery();
+                    totalOrders++;
+                    Console.WriteLine("✅ Order inserted.");
+                }
+            }
+        }
+
+        // Summary
+        Console.WriteLine("\n📊 Import Summary:");
+        Console.WriteLine($"🧾 Orders inserted: {totalOrders}");
+        Console.WriteLine($"🧍 New customers inserted: {newCustomers}");
     }
 
-    static int InsertEmployee(string fullName, string role)
+    static int InsertCustomer(string name, string email)
     {
-        using SqlConnection conn = new SqlConnection(connectionString);
-        conn.Open();
+        using (var conn = new SqlConnection(connectionString))
+        {
+            conn.Open();
+            using (var cmd = new SqlCommand("INSERT INTO Customers (FullName, Email, CreatedAt) VALUES (@Name, @Email, @CreatedAt); SELECT SCOPE_IDENTITY();", conn))
+            {
+                cmd.Parameters.AddWithValue("@Name", name);
+                cmd.Parameters.AddWithValue("@Email", email);
+                cmd.Parameters.AddWithValue("@CreatedAt", DateTime.Now);
 
-        string checkQuery = "SELECT EmployeeID FROM Employees WHERE FullName = @FullName AND Role = @Role";
-        using SqlCommand checkCmd = new SqlCommand(checkQuery, conn);
-        checkCmd.Parameters.AddWithValue("@FullName", fullName);
-        checkCmd.Parameters.AddWithValue("@Role", role);
-
-        object existingId = checkCmd.ExecuteScalar();
-        if (existingId != null)
-            return (int)existingId;
-
-        string insertQuery = @"
-            INSERT INTO Employees (FullName, Role)
-            OUTPUT INSERTED.EmployeeID
-            VALUES (@FullName, @Role)";
-        using SqlCommand insertCmd = new SqlCommand(insertQuery, conn);
-        insertCmd.Parameters.AddWithValue("@FullName", fullName);
-        insertCmd.Parameters.AddWithValue("@Role", role);
-        return (int)insertCmd.ExecuteScalar();
+                return Convert.ToInt32(cmd.ExecuteScalar());
+            }
+        }
     }
 
-    static int InsertProduct(string name, string type, decimal price)
+    static int InsertEmployee(string name, string role)
     {
-        using SqlConnection conn = new SqlConnection(connectionString);
-        conn.Open();
+        using (var conn = new SqlConnection(connectionString))
+        {
+            conn.Open();
+            using (var cmd = new SqlCommand("INSERT INTO Employees (FullName, Role) VALUES (@Name, @Role); SELECT SCOPE_IDENTITY();", conn))
+            {
+                cmd.Parameters.AddWithValue("@Name", name);
+                cmd.Parameters.AddWithValue("@Role", role);
 
-        string checkQuery = "SELECT ProductID FROM Products WHERE ProductName = @Name AND PricePerUnit = @Price";
-        using SqlCommand checkCmd = new SqlCommand(checkQuery, conn);
-        checkCmd.Parameters.AddWithValue("@Name", name);
-        checkCmd.Parameters.AddWithValue("@Price", price);
-
-        object existingId = checkCmd.ExecuteScalar();
-        if (existingId != null)
-            return (int)existingId;
-
-        string insertQuery = @"
-            INSERT INTO Products (ProductName, ProductType, PricePerUnit)
-            OUTPUT INSERTED.ProductID
-            VALUES (@Name, @Type, @Price)";
-        using SqlCommand insertCmd = new SqlCommand(insertQuery, conn);
-        insertCmd.Parameters.AddWithValue("@Name", name);
-        insertCmd.Parameters.AddWithValue("@Type", type);
-        insertCmd.Parameters.AddWithValue("@Price", price);
-        return (int)insertCmd.ExecuteScalar();
+                return Convert.ToInt32(cmd.ExecuteScalar());
+            }
+        }
     }
+}
 
-    static int InsertOrder(int customerId, DateTime date, string payment, decimal total, string status)
-    {
-        using SqlConnection conn = new SqlConnection(connectionString);
-        conn.Open();
-
-        string insertQuery = @"
-            INSERT INTO Orders (CustomerID, OrderDateTime, PaymentMethod, TotalAmount, Status)
-            OUTPUT INSERTED.OrderID
-            VALUES (@CustID, @Date, @Payment, @Total, @Status)";
-        using SqlCommand cmd = new SqlCommand(insertQuery, conn);
-        cmd.Parameters.AddWithValue("@CustID", customerId);
-        cmd.Parameters.AddWithValue("@Date", date);
-        cmd.Parameters.AddWithValue("@Payment", payment);
-        cmd.Parameters.AddWithValue("@Total", total);
-        cmd.Parameters.AddWithValue("@Status", status);
-        return (int)cmd.ExecuteScalar();
-    }
-
-    static void InsertOrderDetail(int orderId, int productId, int quantity)
-    {
-        using SqlConnection conn = new SqlConnection(connectionString);
-        conn.Open();
-
-        decimal price = GetProductPrice(productId, conn);
-        decimal subTotal = price * quantity;
-
-        string insertQuery = @"
-            INSERT INTO OrderDetails (OrderID, ProductID, Quantity, SubTotal)
-            VALUES (@OrderID, @ProductID, @Qty, @SubTotal)";
-        using SqlCommand cmd = new SqlCommand(insertQuery, conn);
-        cmd.Parameters.AddWithValue("@OrderID", orderId);
-        cmd.Parameters.AddWithValue("@ProductID", productId);
-        cmd.Parameters.AddWithValue("@Qty", quantity);
-        cmd.Parameters.AddWithValue("@SubTotal", subTotal);
-        cmd.ExecuteNonQuery();
-    }
-
-    static decimal GetProductPrice(int productId, SqlConnection conn)
-    {
-        string query = "SELECT PricePerUnit FROM Products WHERE ProductID = @ProductID";
-        using SqlCommand cmd = new SqlCommand(query, conn);
-        cmd.Parameters.AddWithValue("@ProductID", productId);
-        return (decimal)cmd.ExecuteScalar();
-    }
+// 🔽 Keep this class at the bottom of Program.cs
+public class OrderRecord
+{
+    public int OrderID { get; set; }
+    public string FullName { get; set; }
+    public string PhoneNumber { get; set; }
+    public string Email { get; set; }
+    public string VehicleNumber { get; set; }
+    public DateTime OrderDateTime { get; set; }
+    public string PaymentMethod { get; set; }
+    public decimal TotalAmount { get; set; }
+    public string Status { get; set; }
 }
