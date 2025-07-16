@@ -12,17 +12,24 @@ class Program
 
     static void Main(string[] args)
     {
-        // Option 1: Insert sample records manually
-        //InsertSampleRecords();
+        Console.WriteLine("Choose an option:");
+        Console.WriteLine("1. Import Orders from Excel");
+        Console.WriteLine("2. View Customer Records in Batches (100 per batch)");
+        Console.Write("Enter your choice (1 or 2): ");
+        var choice = Console.ReadLine();
 
-        // Option 2: Import from Excel
-        ImportFromExcel();
-    }
-
-    static void InsertSampleRecords()
-    {
-        int customerId = InsertCustomer("John Doe", "john@example.com");
-        int employeeId = InsertEmployee("Jane Smith", "Cashier");
+        switch (choice)
+        {
+            case "1":
+                ImportFromExcel();
+                break;
+            case "2":
+                ViewCustomerBatch();
+                break;
+            default:
+                Console.WriteLine("Invalid option selected.");
+                break;
+        }
     }
 
     static void ImportFromExcel()
@@ -127,6 +134,47 @@ class Program
         Console.WriteLine($"🧍 New customers inserted: {newCustomers}");
     }
 
+    static void ViewCustomerBatch()
+    {
+        int batchSize = 100;
+
+        Console.Write("Enter batch number (1 to 10): ");
+        int batchNumber;
+        if (!int.TryParse(Console.ReadLine(), out batchNumber) || batchNumber < 1 || batchNumber > 10)
+        {
+            Console.WriteLine("❌ Invalid batch number. Enter a number between 1 and 10.");
+            return;
+        }
+
+        int offset = (batchNumber - 1) * batchSize;
+
+        using (SqlConnection connection = new SqlConnection(connectionString))
+        {
+            connection.Open();
+
+            string query = @"
+                SELECT * FROM Customers
+                ORDER BY CustomerID
+                OFFSET @Offset ROWS
+                FETCH NEXT @BatchSize ROWS ONLY;
+            ";
+
+            SqlCommand command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@Offset", offset);
+            command.Parameters.AddWithValue("@BatchSize", batchSize);
+
+            using (SqlDataReader reader = command.ExecuteReader())
+            {
+                Console.WriteLine($"\n📦 Batch {batchNumber} Customer Records:\n");
+
+                while (reader.Read())
+                {
+                    Console.WriteLine($"ID: {reader["CustomerID"]}, Name: {reader["FullName"]}, Phone: {reader["PhoneNumber"]}");
+                }
+            }
+        }
+    }
+
     static int InsertCustomer(string name, string email)
     {
         using (var conn = new SqlConnection(connectionString))
@@ -159,7 +207,7 @@ class Program
     }
 }
 
-// 🔽 Keep this class at the bottom of Program.cs
+// 🔽 Data class for importing Excel records
 public class OrderRecord
 {
     public int OrderID { get; set; }
