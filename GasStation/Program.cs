@@ -12,27 +12,54 @@ class Program
 
     static void Main(string[] args)
     {
-        Console.WriteLine("Choose an option:");
-        Console.WriteLine("1. Import Orders from Excel");
-        Console.WriteLine("2. View Customer Records in Batches (100 per batch)");
-        Console.Write("Enter your choice (1 or 2): ");
-        var choice = Console.ReadLine();
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
-        switch (choice)
+        while (true)
         {
-            case "1":
-                ImportFromExcel();
-                break;
-            case "2":
-                ViewCustomerBatch();
-                break;
-            default:
-                Console.WriteLine("Invalid option selected.");
-                break;
+            Console.WriteLine("\nChoose an option:");
+            Console.WriteLine("1. Import All Orders from Excel");
+            Console.WriteLine("2. View Customer Records in Batches (100 per batch)");
+            Console.WriteLine("3. Insert Records Into DB by Batch Number");
+            Console.WriteLine("4. Exit");
+            Console.Write("Enter your choice (1-4): ");
+
+            var choice = Console.ReadLine();
+
+            switch (choice)
+            {
+                case "1":
+                    ImportFromExcelFull();
+                    break;
+
+                case "2":
+                    ViewCustomerBatch();
+                    break;
+
+                case "3":
+                    Console.Write("Enter batch number to insert: ");
+                    if (int.TryParse(Console.ReadLine(), out int batchNumber))
+                    {
+                        InsertBatchFromExcel(batchNumber);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Invalid batch number");
+                    }
+                    break;
+
+                case "4":
+                    Console.WriteLine("Exiting...");
+                    return;
+
+                default:
+                    Console.WriteLine("Invalid choice, try again.");
+                    break;
+            }
         }
     }
 
-    static void ImportFromExcel()
+    // Import all records at once (full import)
+    static void ImportFromExcelFull()
     {
         string filePath = @"C:\Users\sande\source\repos\GasStation\GasStation\Resource\PurchaseOrdersWithCustomer.xlsx";
 
@@ -42,8 +69,43 @@ class Program
             return;
         }
 
-        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var allRecords = ReadExcelFile(filePath);
+        InsertRecordsToDb(allRecords);
+    }
 
+    // Insert only one batch of 100 records by batch number (1-based)
+    static void InsertBatchFromExcel(int batchNumber)
+    {
+        string filePath = @"C:\Users\sande\source\repos\GasStation\GasStation\Resource\PurchaseOrdersWithCustomer.xlsx";
+
+        if (!File.Exists(filePath))
+        {
+            Console.WriteLine("❌ Excel file not found at: " + filePath);
+            return;
+        }
+
+        var allRecords = ReadExcelFile(filePath);
+
+        int batchSize = 100;
+        int startIndex = (batchNumber - 1) * batchSize;
+
+        if (startIndex >= allRecords.Count)
+        {
+            Console.WriteLine("❌ Batch number exceeds total records.");
+            return;
+        }
+
+        var batchRecords = allRecords.GetRange(startIndex, Math.Min(batchSize, allRecords.Count - startIndex));
+
+        InsertRecordsToDb(batchRecords);
+
+        Console.WriteLine($"\n✅ Batch {batchNumber} inserted successfully.");
+        ViewCustomerBatchForBatch(batchNumber);
+    }
+
+    // Read Excel into list of OrderRecord
+    static List<OrderRecord> ReadExcelFile(string filePath)
+    {
         var records = new List<OrderRecord>();
 
         using (var stream = File.Open(filePath, FileMode.Open, FileAccess.Read))
@@ -69,7 +131,12 @@ class Program
                 });
             }
         }
+        return records;
+    }
 
+    // Insert customers and orders to DB
+    static void InsertRecordsToDb(List<OrderRecord> records)
+    {
         int newCustomers = 0;
         int totalOrders = 0;
 
@@ -123,29 +190,63 @@ class Program
 
                     insertOrder.ExecuteNonQuery();
                     totalOrders++;
-                    Console.WriteLine("✅ Order inserted.");
                 }
             }
         }
 
-        // Summary
-        Console.WriteLine("\n📊 Import Summary:");
-        Console.WriteLine($"🧾 Orders inserted: {totalOrders}");
+        Console.WriteLine($"\n🧾 Orders inserted: {totalOrders}");
         Console.WriteLine($"🧍 New customers inserted: {newCustomers}");
     }
 
+    // View customer records by batch number (100 per batch)
     static void ViewCustomerBatch()
     {
         int batchSize = 100;
 
-        Console.Write("Enter batch number (1 to 10): ");
-        int batchNumber;
-        if (!int.TryParse(Console.ReadLine(), out batchNumber) || batchNumber < 1 || batchNumber > 10)
+        using (SqlConnection connection = new SqlConnection(connectionString))
         {
-            Console.WriteLine("❌ Invalid batch number. Enter a number between 1 and 10.");
-            return;
-        }
+            connection.Open();
 
+            // Get total records count to calculate batches
+            int totalRecords = (int)new SqlCommand("SELECT COUNT(*) FROM Customers", connection).ExecuteScalar();
+            int totalBatches = (int)Math.Ceiling(totalRecords / (double)batchSize);
+
+            Console.Write($"Enter batch number (1 to {totalBatches}): ");
+            if (!int.TryParse(Console.ReadLine(), out int batchNumber) || batchNumber < 1 || batchNumber > totalBatches)
+            {
+                Console.WriteLine("❌ Invalid batch number.");
+                return;
+            }
+
+            int offset = (batchNumber - 1) * batchSize;
+
+            string query = @"
+                SELECT * FROM Customers
+                ORDER BY CustomerID
+                OFFSET @Offset ROWS
+                FETCH NEXT @BatchSize ROWS ONLY;
+            ";
+
+            SqlCommand command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@Offset", offset);
+            command.Parameters.AddWithValue("@BatchSize", batchSize);
+
+            using (SqlDataReader reader = command.ExecuteReader())
+            {
+                Console.WriteLine($"\n📦 Customer Records - Batch {batchNumber}:\n");
+
+                while (reader.Read())
+                {
+                    Console.WriteLine($"ID: {reader["CustomerID"]}, Name: {reader["FullName"]}, Phone: {reader["PhoneNumber"]}");
+                }
+            }
+        }
+    }
+
+    // View customers of a specific batch (used after insert)
+    static void ViewCustomerBatchForBatch(int batchNumber)
+    {
+        int batchSize = 100;
         int offset = (batchNumber - 1) * batchSize;
 
         using (SqlConnection connection = new SqlConnection(connectionString))
@@ -165,7 +266,7 @@ class Program
 
             using (SqlDataReader reader = command.ExecuteReader())
             {
-                Console.WriteLine($"\n📦 Batch {batchNumber} Customer Records:\n");
+                Console.WriteLine($"\n📦 Customers in Batch {batchNumber}:\n");
 
                 while (reader.Read())
                 {
@@ -174,40 +275,9 @@ class Program
             }
         }
     }
-
-    static int InsertCustomer(string name, string email)
-    {
-        using (var conn = new SqlConnection(connectionString))
-        {
-            conn.Open();
-            using (var cmd = new SqlCommand("INSERT INTO Customers (FullName, Email, CreatedAt) VALUES (@Name, @Email, @CreatedAt); SELECT SCOPE_IDENTITY();", conn))
-            {
-                cmd.Parameters.AddWithValue("@Name", name);
-                cmd.Parameters.AddWithValue("@Email", email);
-                cmd.Parameters.AddWithValue("@CreatedAt", DateTime.Now);
-
-                return Convert.ToInt32(cmd.ExecuteScalar());
-            }
-        }
-    }
-
-    static int InsertEmployee(string name, string role)
-    {
-        using (var conn = new SqlConnection(connectionString))
-        {
-            conn.Open();
-            using (var cmd = new SqlCommand("INSERT INTO Employees (FullName, Role) VALUES (@Name, @Role); SELECT SCOPE_IDENTITY();", conn))
-            {
-                cmd.Parameters.AddWithValue("@Name", name);
-                cmd.Parameters.AddWithValue("@Role", role);
-
-                return Convert.ToInt32(cmd.ExecuteScalar());
-            }
-        }
-    }
 }
 
-// 🔽 Data class for importing Excel records
+// Model class for Excel data
 public class OrderRecord
 {
     public int OrderID { get; set; }
